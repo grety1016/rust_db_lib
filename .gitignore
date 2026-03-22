@@ -1,0 +1,41 @@
+# === Rust build output ===
+/target/
+**/*.rs.bk
+
+# === Logs ===
+/logfiles/
+*.log
+
+# === Environment / Secrets ===
+.env
+.env.*
+*.env
+*.env.local
+*.env.development
+*.env.production
+
+# === Database config / credentials ===
+/mssql/*.json
+/mssql/*.toml
+/mssql/*.env
+/mysql/*.json
+/mysql/*.toml
+/mysql/*.env
+/pgsql/*.json
+/pgsql/*.toml
+/pgsql/*.env
+
+# === OS / Editor / IDE ===
+# macOS
+.DS_Store
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# JetBrains
+.idea/
+
+# === Misc ===
+/tmp/
+*.tmp
