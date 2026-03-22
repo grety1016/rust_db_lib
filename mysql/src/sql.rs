@@ -1,6 +1,7 @@
 use crate::{Error, Result, ResultSet};
-use mysql_async::params::Params;
-use mysql_async::prelude::Queryable;
+use futures_util::stream::{BoxStream, StreamExt};
+use futures_util::TryStreamExt;
+use mysql_async::{prelude::*, Params};
 use std::{borrow::Cow, time};
 use tokio::time::timeout;
 
@@ -212,7 +213,6 @@ impl<'a> Sql<'a> {
         }
     }
 
-    /// 查询接口
     pub(crate) async fn query_interface<'b, E>(
         self,
         conn: &'b E,
@@ -241,71 +241,86 @@ impl<'a> Sql<'a> {
             Params::Positional(self.params)
         };
 
-        let rv = {
-            let mut raw = conn.lock_raw().await;
-            if let Some(duration) = duration {
-                if is_empty_params {
-                    timeout(duration, raw.query(self.sql.as_ref()))
-                        .await
-                        .map_err(|_| Error::QueryTimeout)
-                        .and_then(|rv| rv.map_err(Error::from))
-                } else {
-                    timeout(duration, raw.exec(self.sql.as_ref(), params))
-                        .await
-                        .map_err(|_| Error::QueryTimeout)
-                        .and_then(|rv| rv.map_err(Error::from))
+        let mut guard = conn.lock_raw().await;
+        let result_stream = if is_empty_params {
+            let res = if let Some(duration) = duration {
+                match timeout(duration, guard.query_iter(self.sql.as_ref())).await {
+                    Ok(Ok(res)) => res,
+                    Ok(Err(e)) => {
+                        conn.set_pending(false);
+                        return Err(Error::from(e));
+                    }
+                    Err(_) => {
+                        conn.set_pending(false);
+                        return Err(Error::QueryTimeout);
+                    }
                 }
-            } else if is_empty_params {
-                raw.query(self.sql.as_ref()).await.map_err(Error::from)
             } else {
-                raw.exec(self.sql.as_ref(), params)
+                guard.query_iter(self.sql.as_ref()).await.map_err(|e| {
+                    conn.set_pending(false);
+                    Error::from(e)
+                })?
+            };
+            let s = res
+                .stream_and_drop()
+                .await
+                .map_err(Error::from)?
+                .ok_or_else(|| Error::custom("No result stream"))?
+                .map_err(Error::from)
+                .boxed();
+            unsafe {
+                std::mem::transmute::<
+                    BoxStream<'_, Result<mysql_async::Row>>,
+                    BoxStream<'b, Result<mysql_async::Row>>,
+                >(s)
+            }
+        } else {
+            let res = if let Some(duration) = duration {
+                match timeout(duration, guard.exec_iter(self.sql.as_ref(), params)).await {
+                    Ok(Ok(res)) => res,
+                    Ok(Err(e)) => {
+                        conn.set_pending(false);
+                        return Err(Error::from(e));
+                    }
+                    Err(_) => {
+                        conn.set_pending(false);
+                        return Err(Error::QueryTimeout);
+                    }
+                }
+            } else {
+                guard
+                    .exec_iter(self.sql.as_ref(), params)
                     .await
-                    .map_err(Error::from)
+                    .map_err(|e| {
+                        conn.set_pending(false);
+                        Error::from(e)
+                    })?
+            };
+            let s = res
+                .stream_and_drop()
+                .await
+                .map_err(Error::from)?
+                .ok_or_else(|| Error::custom("No result stream"))?
+                .map_err(Error::from)
+                .boxed();
+            unsafe {
+                std::mem::transmute::<
+                    BoxStream<'_, Result<mysql_async::Row>>,
+                    BoxStream<'b, Result<mysql_async::Row>>,
+                >(s)
             }
         };
 
-        match rv {
-            Ok(rows) => {
-                conn.set_pending(false);
-                info!(
-                    "#{}> [{}] @{} - elapsed: {}ms, rows: {}, sql: {}",
-                    conn.spid(),
-                    conn.log_category(),
-                    conn.log_db_name(),
-                    now.elapsed().as_millis(),
-                    rows.len(),
-                    sql_preview
-                );
-                Ok(ResultSet::new(rows))
-            }
-            Err(e) => {
-                conn.set_pending(false);
-                if matches!(e, Error::QueryTimeout) {
-                    warn!(
-                        "#{}> [{}] @{} - elapsed: {}ms, timeout, sql: {}",
-                        conn.spid(),
-                        conn.log_category(),
-                        conn.log_db_name(),
-                        now.elapsed().as_millis(),
-                        sql_preview
-                    );
-                } else {
-                    error!(
-                        "#{}> [{}] @{} - elapsed: {}ms, error: {}, sql: {}",
-                        conn.spid(),
-                        conn.log_category(),
-                        conn.log_db_name(),
-                        now.elapsed().as_millis(),
-                        e,
-                        sql_preview
-                    );
-                }
-                if matches!(e, Error::QueryTimeout) {
-                    let _ = conn.reconnect().await;
-                }
-                Err(e)
-            }
-        }
+        conn.set_pending(false);
+        info!(
+            "#{}> [{}] @{} - elapsed: {}ms, streaming started, sql: {}",
+            conn.spid(),
+            conn.log_category(),
+            conn.log_db_name(),
+            now.elapsed().as_millis(),
+            sql_preview
+        );
+        Ok(ResultSet::new(result_stream, conn.alive_rs_ref(), guard))
     }
 }
 

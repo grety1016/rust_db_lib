@@ -1,11 +1,19 @@
 use mysql::prelude::*;
+use std::time::Duration;
 
 #[tokio::test]
 async fn test_mysql_connection() -> Result<(), mysql::Error> {
     let url = "mysql://root:Kephi520!@127.0.0.1:3306/Salary";
-    let pool = mysql::Pool::builder().max_size(5).connect(url).await?;
+    let pool = tokio::time::timeout(
+        Duration::from_secs(3),
+        mysql::Pool::builder().max_size(5).connect(url),
+    )
+    .await
+    .map_err(|_| mysql::Error::custom("connect timeout"))??;
 
-    let conn = pool.get().await?;
+    let conn = tokio::time::timeout(Duration::from_secs(3), pool.get())
+        .await
+        .map_err(|_| mysql::Error::custom("get connection timeout"))??;
 
     // 测试 sql_bind! 和参数绑定 (安全性)
     let name = "test_user";

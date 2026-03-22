@@ -4,27 +4,30 @@ mod prelude;
 use bytes::Bytes;
 use futures_util::stream;
 use prelude::*;
+use std::time::Duration;
 use std::time::Instant;
 
 #[tokio::test]
 async fn test_copy_in_basic() {
     init();
 
-    let pool = pgsql::Pool::builder()
-        .max_size(1)
-        .connect(&conn_str())
+    let conn_str = conn_str();
+    let pool = pgsql::Pool::builder().max_size(1).connect(&conn_str);
+    let pool = tokio::time::timeout(Duration::from_secs(3), pool)
         .await
+        .expect("connect timeout")
         .unwrap();
 
-    let conn = pool.get().await.unwrap();
+    let conn = tokio::time::timeout(Duration::from_secs(3), pool.get())
+        .await
+        .expect("get connection timeout")
+        .unwrap();
 
     // 1. 准备测试表
-    conn.exec("DROP TABLE IF EXISTS test_copy_table")
+    conn.exec("CREATE TABLE IF NOT EXISTS test_copy_table (id INT, name TEXT)")
         .await
         .unwrap();
-    conn.exec("CREATE TABLE test_copy_table (id INT, name TEXT)")
-        .await
-        .unwrap();
+    conn.exec("TRUNCATE TABLE test_copy_table").await.unwrap();
 
     // 2. 准备 CSV 数据流 (id,name)
     let chunks = vec![
@@ -63,22 +66,33 @@ async fn test_copy_in_million_rows() {
     let conn = pool.get().await.unwrap();
 
     // 1. 准备大表
-    conn.exec("DROP TABLE IF EXISTS million_rows_table")
-        .await
-        .unwrap();
-    conn.exec("CREATE TABLE million_rows_table (id INT, name TEXT, created_at TIMESTAMP)")
+    conn.exec(
+        "CREATE TABLE IF NOT EXISTS million_rows_table (id INT, name TEXT, created_at TIMESTAMP)",
+    )
+    .await
+    .unwrap();
+    conn.exec("TRUNCATE TABLE million_rows_table")
         .await
         .unwrap();
 
-    let total_rows = 1_000_000;
-    let batch_size = 10_000; // 每批推送 1万条
+    let total_rows: usize = std::env::var("PGSQL_COPY_IN_ROWS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000);
+    let batch_size: usize = std::env::var("PGSQL_COPY_IN_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000);
 
     // 2. 模拟内存流生成器 (不占用大量内存，按需生成)
-    let chunks: Vec<Result<Bytes, std::io::Error>> = (0..(total_rows / batch_size))
+    let chunks: Vec<Result<Bytes, std::io::Error>> = (0..total_rows.div_ceil(batch_size))
         .map(|batch_idx| {
             let mut buf = String::with_capacity(batch_size * 50);
             for i in 0..batch_size {
                 let id = batch_idx * batch_size + i;
+                if id >= total_rows {
+                    break;
+                }
                 buf.push_str(&format!("{},User_{},2023-01-01 00:00:00\n", id, id));
             }
             Ok(Bytes::from(buf))
@@ -87,7 +101,7 @@ async fn test_copy_in_million_rows() {
 
     let stream = stream::iter(chunks);
 
-    println!("开始百万级数据 copy_in 推送测试 ({} 条)...", total_rows);
+    println!("开始数据 copy_in 推送测试 ({} 条)...", total_rows);
     let start = Instant::now();
 
     // 3. 执行海量导入
@@ -95,7 +109,7 @@ async fn test_copy_in_million_rows() {
     let count = conn.copy_in(sql, stream).await.unwrap();
 
     let duration = start.elapsed();
-    println!("百万级数据推送完成！");
+    println!("数据推送完成！");
     println!("总记录数: {}", count);
     println!("总耗时: {:?}", duration);
     println!(

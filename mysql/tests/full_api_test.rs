@@ -29,9 +29,11 @@ async fn test_mysql_full_api() -> Result<(), mysql::Error> {
     assert!(conn.db_exists("Salary").await?);
 
     // 3. Schema setup for testing
-    conn.exec("DROP TABLE IF EXISTS full_api_test").await?;
-    conn.exec("CREATE TABLE full_api_test (id INT PRIMARY KEY, name VARCHAR(50), age INT)")
-        .await?;
+    conn.exec(
+        "CREATE TABLE IF NOT EXISTS full_api_test (id INT PRIMARY KEY, name VARCHAR(50), age INT)",
+    )
+    .await?;
+    conn.exec("TRUNCATE TABLE full_api_test").await?;
     assert!(conn.object_exists("full_api_test").await?);
     assert!(conn.column_exists("full_api_test", "name").await?);
 
@@ -64,8 +66,8 @@ async fn test_mysql_full_api() -> Result<(), mysql::Error> {
         let mut rs = conn
             .query("SELECT id, name, age FROM full_api_test ORDER BY id")
             .await?;
-        assert_eq!(rs.column_count(), 3);
-        let row1 = rs.fetch().unwrap();
+        let row1 = rs.fetch().await?.unwrap();
+        assert_eq!(row1.column_count(), 3);
         assert_eq!(row1.try_get_i32(0)?.unwrap(), 1);
         assert_eq!(row1.try_get_string(1)?.unwrap(), "Alice");
     }

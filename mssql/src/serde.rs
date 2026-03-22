@@ -80,13 +80,19 @@ pub(crate) struct RowOptional(Option<Row>);
 ///
 /// # Examples
 ///
-/// ```ignore
-/// let result: Vec<String> = conn.query_collect("SELECT 'aaaa' AS col1 UNION SELECT 'bbb' AS col1").await.unwrap();
+/// ```rust
+/// # use mssql::prelude::*;
+/// # async fn _example() -> Result<(), mssql::Error> {
+/// # let conn: mssql::Connection = unimplemented!();
+/// let result: Vec<String> =
+///     conn.query_collect("SELECT 'aaaa' AS col1 UNION SELECT 'bbb' AS col1").await?;
 /// println!("result: {:?}", result);
-/// let result: String = conn.query_first("SELECT 'aaaa' AS col1").await.unwrap();
+/// let result: String = conn.query_first("SELECT 'aaaa' AS col1").await?;
 /// println!("result: {}", result);
-/// let result: Option<String> = conn.query_first("SELECT 'aaaa' AS col1").await.unwrap();
+/// let result: Option<String> = conn.query_first("SELECT 'aaaa' AS col1").await?;
 /// println!("result: {:?}", result);
+/// # Ok(())
+/// # }
 /// ```
 macro_rules! forward_to_row_first_column{
     ($($func:ident)*) => {

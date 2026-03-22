@@ -1,0 +1,1 @@
+bash preprod_check.sh

@@ -30,9 +30,8 @@ async fn test_mysql_stress_realistic() -> Result<(), mysql::Error> {
     // Schema setup
     {
         let conn = pool.get().await?;
-        conn.exec("DROP TABLE IF EXISTS stress_complex").await?;
         conn.exec(
-            "CREATE TABLE stress_complex (
+            "CREATE TABLE IF NOT EXISTS stress_complex (
             id CHAR(36) PRIMARY KEY,
             name VARCHAR(100),
             age INT,
@@ -43,6 +42,7 @@ async fn test_mysql_stress_realistic() -> Result<(), mysql::Error> {
         )",
         )
         .await?;
+        conn.exec("TRUNCATE TABLE stress_complex").await?;
     }
 
     let concurrent_tasks = 100;

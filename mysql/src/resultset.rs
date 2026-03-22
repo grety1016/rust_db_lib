@@ -1,56 +1,50 @@
-use crate::{row::Row, Result};
+use crate::{connection::RawGuard, row::Row, Result};
+use futures_util::TryStreamExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 结果集
 pub struct ResultSet<'a> {
-    rows: Vec<mysql_async::Row>,
-    current: usize,
-    _marker: std::marker::PhantomData<&'a ()>,
+    stream: Option<futures_util::stream::BoxStream<'a, Result<mysql_async::Row>>>,
+    alive: &'a AtomicBool,
+    _guard: RawGuard<'a>,
 }
 
 impl<'a> ResultSet<'a> {
-    pub(crate) fn new(rows: Vec<mysql_async::Row>) -> Self {
+    pub(crate) fn new(
+        stream: futures_util::stream::BoxStream<'a, Result<mysql_async::Row>>,
+        alive: &'a AtomicBool,
+        guard: RawGuard<'a>,
+    ) -> Self {
+        alive.store(true, Ordering::SeqCst);
         Self {
-            rows,
-            current: 0,
-            _marker: std::marker::PhantomData,
+            stream: Some(stream),
+            alive,
+            _guard: guard,
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    pub fn column_count(&self) -> usize {
-        self.rows.first().map(|r| r.columns().len()).unwrap_or(0)
-    }
-
-    pub fn fetch(&mut self) -> Option<Row> {
-        if self.current < self.rows.len() {
-            let row = self.rows[self.current].clone();
-            self.current += 1;
-            Some(Row::new(row))
+    pub async fn fetch(&mut self) -> Result<Option<Row>> {
+        if let Some(stream) = self.stream.as_mut() {
+            match stream.try_next().await? {
+                Some(row) => Ok(Some(Row::new(row))),
+                None => {
+                    self.alive.store(false, Ordering::SeqCst);
+                    self.stream = None;
+                    Ok(None)
+                }
+            }
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    pub fn reset(&mut self) {
-        self.current = 0;
     }
 
     pub async fn first_row(&mut self) -> Result<Option<Row>> {
-        self.reset();
-        Ok(self.fetch())
+        self.fetch().await
     }
 
     pub async fn collect_row(&mut self) -> Result<Vec<Row>> {
-        self.reset();
-        let mut rows = Vec::with_capacity(self.rows.len());
-        while let Some(row) = self.fetch() {
+        let mut rows = Vec::new();
+        while let Some(row) = self.fetch().await? {
             rows.push(row);
         }
         Ok(rows)
@@ -162,5 +156,11 @@ impl<'a> ResultSet<'a> {
         } else {
             Ok(None)
         }
+    }
+}
+
+impl<'a> Drop for ResultSet<'a> {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
     }
 }

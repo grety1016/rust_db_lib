@@ -427,11 +427,12 @@ async fn init_mysql() -> Result<(), MySqlError> {
             1
         ))
         .await?;
-    if let Some(row) = rs.fetch() {
+    while let Some(row) = rs.fetch().await? {
         let _ = row.try_get_i32("id")?;
         let _ = row.try_get_string("name")?;
         let _ = row.try_get_i32("age")?;
     }
+    drop(rs);
 
     let _rows: Vec<mysql::Row> = conn.query_collect_row("SELECT * FROM demo_users").await?;
     let _first_row = conn
@@ -605,11 +606,12 @@ async fn init_pgsql() -> Result<(), PgsqlError> {
             1
         ))
         .await?;
-    if let Some(row) = rs.fetch() {
+    while let Some(row) = rs.fetch().await? {
         let _ = row.try_get_i32(0)?;
         let _ = row.try_get_string(1)?;
         let _ = row.try_get_i32(2)?;
     }
+    drop(rs);
     let _rows: Vec<pgsql::Row> = conn.query_collect_row("SELECT * FROM demo_users").await?;
     let _first_row = conn
         .query_first_row("SELECT * FROM demo_users WHERE id = 1")

@@ -1,4 +1,5 @@
 use crate::{Connection, Error, Result, ResultSet};
+use futures_util::{StreamExt, TryStreamExt};
 use std::{borrow::Cow, time};
 use tokio::time::timeout;
 
@@ -253,33 +254,41 @@ impl<'a> Sql<'a> {
         let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
             self.params.iter().map(|p| p.as_ref() as _).collect();
 
-        let rv = {
-            let raw = conn.raw_ref().lock().await;
-            if let Some(duration) = duration {
-                timeout(duration, raw.query(self.sql.as_ref(), &params))
-                    .await
-                    .map_err(|_| Error::QueryTimeout)
-                    .and_then(|rv| rv.map_err(Error::from))
-            } else {
-                raw.query(self.sql.as_ref(), &params)
-                    .await
-                    .map_err(Error::from)
-            }
+        let guard = conn.raw_ref().lock().await;
+        let rv = if let Some(duration) = duration {
+            timeout(duration, guard.query_raw(self.sql.as_ref(), params))
+                .await
+                .map_err(|_| Error::QueryTimeout)
+                .and_then(|rv| rv.map_err(Error::from))
+        } else {
+            guard
+                .query_raw(self.sql.as_ref(), params)
+                .await
+                .map_err(Error::from)
         };
 
         match rv {
-            Ok(rows) => {
+            Ok(stream) => {
                 conn.set_pending(false);
                 info!(
-                    "#{}> [{}] @{} - elapsed: {}ms, rows: {}, sql: {}",
+                    "#{}> [{}] @{} - elapsed: {}ms, streaming started, sql: {}",
                     conn.spid(),
                     conn.log_category(),
                     conn.log_db_name(),
                     now.elapsed().as_millis(),
-                    rows.len(),
                     sql_preview
                 );
-                Ok(crate::resultset::ResultSet::new(rows, conn))
+                // 使用 unsafe transmute 延长流的生命周期到 'b (Connection 生命周期)
+                // 这样流就可以和 MutexGuard 一起存在于 ResultSet 中
+                let stream = stream.map_err(Error::from);
+                let stream: futures_util::stream::BoxStream<'b, Result<tokio_postgres::Row>> =
+                    unsafe { std::mem::transmute(stream.boxed()) };
+
+                Ok(crate::resultset::ResultSet::new(
+                    stream,
+                    conn.alive_rs_ref(),
+                    guard,
+                ))
             }
             Err(e) => {
                 conn.set_pending(false);

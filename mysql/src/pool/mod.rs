@@ -2,16 +2,28 @@ use crate::{connection::MySqlExecutor, Error, Result};
 use bb8::{Builder, ManageConnection};
 use tracing::info;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 pub(crate) type RawConnection = mysql_async::Conn;
 
 /// 连接池管理容器
 pub struct ConnectionManager {
     opts: mysql_async::Opts,
+    local_infile_registry: Arc<Mutex<HashMap<String, crate::connection::InfileStream>>>,
 }
 
 impl ConnectionManager {
     pub fn new(opts: mysql_async::Opts) -> Self {
-        Self { opts }
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let handler = crate::connection::RegistryInfileHandler::new(registry.clone());
+        let opts = mysql_async::OptsBuilder::from_opts(opts)
+            .local_infile_handler(Some(handler))
+            .into();
+        Self {
+            opts,
+            local_infile_registry: registry,
+        }
     }
 
     pub fn build(conn_str: &str) -> Result<Self> {
@@ -31,7 +43,8 @@ impl ManageConnection for ConnectionManager {
         let raw = mysql_async::Conn::new(self.opts.clone())
             .await
             .map_err(Error::from)?;
-        let mut conn = crate::Connection::new(raw, self.opts.clone());
+        let mut conn =
+            crate::Connection::new(raw, self.opts.clone(), self.local_infile_registry.clone());
         conn.init().await?;
         Ok(conn)
     }

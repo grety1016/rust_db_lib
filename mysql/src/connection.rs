@@ -11,17 +11,19 @@ use std::sync::{Arc, Mutex};
 use std::time;
 use tracing::{error, info};
 
-type InfileStream =
+pub type InfileStream =
     Pin<Box<dyn Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send + 'static>>;
 
-lazy_static::lazy_static! {
-    /// 全局 LocalInfile 注册表，用于将文件名映射到异步流
-    static ref LOCAL_INFILE_REGISTRY: Arc<Mutex<HashMap<String, InfileStream>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+/// 默认的 LocalInfile 处理器，由驱动在需要 LOCAL INFILE 时调用
+pub(crate) struct RegistryInfileHandler {
+    registry: Arc<Mutex<HashMap<String, InfileStream>>>,
 }
 
-/// 默认的 LocalInfile 处理器，由驱动在需要 LOCAL INFILE 时调用
-pub(crate) struct RegistryInfileHandler;
+impl RegistryInfileHandler {
+    pub fn new(registry: Arc<Mutex<HashMap<String, InfileStream>>>) -> Self {
+        Self { registry }
+    }
+}
 
 impl mysql_async::prelude::GlobalHandler for RegistryInfileHandler {
     fn handle(
@@ -29,8 +31,9 @@ impl mysql_async::prelude::GlobalHandler for RegistryInfileHandler {
         file_name: &[u8],
     ) -> BoxFuture<'static, std::result::Result<InfileStream, mysql_async::LocalInfileError>> {
         let name = String::from_utf8_lossy(file_name).to_string();
+        let registry = self.registry.clone();
         async move {
-            let mut registry = LOCAL_INFILE_REGISTRY.lock().map_err(|_| {
+            let mut registry = registry.lock().map_err(|_| {
                 mysql_async::LocalInfileError::from(std::io::Error::other(
                     "local infile registry poisoned",
                 ))
@@ -55,17 +58,13 @@ impl IntoConfig for &str {
     fn into_config(self) -> Result<mysql_async::Opts> {
         let opts = mysql_async::Opts::from_url(self)
             .map_err(|e| Error::custom(format!("Invalid connection string: {}", e)))?;
-        Ok(mysql_async::OptsBuilder::from_opts(opts)
-            .local_infile_handler(Some(RegistryInfileHandler))
-            .into())
+        Ok(mysql_async::OptsBuilder::from_opts(opts).into())
     }
 }
 
 impl IntoConfig for mysql_async::Opts {
     fn into_config(self) -> Result<mysql_async::Opts> {
-        Ok(mysql_async::OptsBuilder::from_opts(self)
-            .local_infile_handler(Some(RegistryInfileHandler))
-            .into())
+        Ok(mysql_async::OptsBuilder::from_opts(self).into())
     }
 }
 
@@ -102,9 +101,11 @@ pub trait MySqlExecutor: Send + Sync {
     fn log_db_name(&self) -> &str;
     fn is_pending(&self) -> bool;
     fn set_pending(&self, pending: bool);
+    fn alive_rs_ref(&self) -> &AtomicBool;
     fn trans_depth(&self) -> u8;
     fn change_trans_depth(&self, delta: i8);
     fn current_db(&self) -> &str;
+    fn local_infile_registry(&self) -> &Arc<Mutex<HashMap<String, InfileStream>>>;
 
     /// 重新连接
     async fn reconnect(&self) -> Result<()>;
@@ -441,7 +442,8 @@ pub trait MySqlExecutor: Send + Sync {
         // 将 Stream 转换为 InfileStream
         let stream = stream.map(|res| res.map(|mut b| b.copy_to_bytes(b.remaining())));
         {
-            let mut registry = LOCAL_INFILE_REGISTRY
+            let mut registry = self
+                .local_infile_registry()
                 .lock()
                 .map_err(|_| Error::custom("local infile registry poisoned"))?;
             registry.insert(file_id.clone(), Box::pin(stream));
@@ -489,7 +491,8 @@ pub trait MySqlExecutor: Send + Sync {
                     sql
                 );
                 // 确保清理注册表 (虽然 handle 成功会自动清理, 但如果执行失败可能还残留)
-                let mut registry = LOCAL_INFILE_REGISTRY
+                let mut registry = self
+                    .local_infile_registry()
                     .lock()
                     .map_err(|_| Error::custom("local infile registry poisoned"))?;
                 registry.remove(&file_id);
@@ -504,10 +507,12 @@ pub struct Connection {
     raw: tokio::sync::Mutex<RawConnection>,
     conn_cfg: mysql_async::Opts,
     pending: AtomicBool,
+    alive_rs: AtomicBool,
     spid: AtomicU32,
     trans_depth: AtomicU8,
     db_name: String,
     log_category: String,
+    local_infile_registry: Arc<Mutex<HashMap<String, InfileStream>>>,
 }
 
 impl Connection {
@@ -515,20 +520,26 @@ impl Connection {
     pub async fn connect(conn_cfg: impl IntoConfig) -> Result<Connection> {
         let conn_cfg = conn_cfg.into_config()?;
         let raw = mysql_async::Conn::new(conn_cfg.clone()).await?;
-        let mut conn = Connection::new(raw, conn_cfg);
+        let mut conn = Connection::new(raw, conn_cfg, Arc::new(Mutex::new(HashMap::new())));
         conn.init().await?;
         Ok(conn)
     }
 
-    pub(crate) fn new(raw: RawConnection, conn_cfg: mysql_async::Opts) -> Self {
+    pub(crate) fn new(
+        raw: RawConnection,
+        conn_cfg: mysql_async::Opts,
+        registry: Arc<Mutex<HashMap<String, InfileStream>>>,
+    ) -> Self {
         Self {
             raw: tokio::sync::Mutex::new(raw),
             conn_cfg,
             pending: AtomicBool::new(false),
+            alive_rs: AtomicBool::new(false),
             spid: AtomicU32::new(0),
             trans_depth: AtomicU8::new(0),
             db_name: String::new(),
             log_category: String::new(),
+            local_infile_registry: registry,
         }
     }
 
@@ -601,6 +612,9 @@ impl MySqlExecutor for Connection {
     fn set_pending(&self, pending: bool) {
         self.pending.store(pending, Ordering::SeqCst);
     }
+    fn alive_rs_ref(&self) -> &AtomicBool {
+        &self.alive_rs
+    }
     fn trans_depth(&self) -> u8 {
         self.trans_depth.load(Ordering::SeqCst)
     }
@@ -614,6 +628,9 @@ impl MySqlExecutor for Connection {
     }
     fn current_db(&self) -> &str {
         &self.db_name
+    }
+    fn local_infile_registry(&self) -> &Arc<Mutex<HashMap<String, InfileStream>>> {
+        &self.local_infile_registry
     }
     async fn reconnect(&self) -> Result<()> {
         Connection::reconnect(self).await
@@ -642,6 +659,9 @@ impl<'a> MySqlExecutor for bb8::PooledConnection<'a, crate::pool::ConnectionMana
     fn set_pending(&self, pending: bool) {
         self.deref().set_pending(pending)
     }
+    fn alive_rs_ref(&self) -> &AtomicBool {
+        self.deref().alive_rs_ref()
+    }
     fn trans_depth(&self) -> u8 {
         self.deref().trans_depth()
     }
@@ -650,6 +670,9 @@ impl<'a> MySqlExecutor for bb8::PooledConnection<'a, crate::pool::ConnectionMana
     }
     fn current_db(&self) -> &str {
         self.deref().current_db()
+    }
+    fn local_infile_registry(&self) -> &Arc<Mutex<HashMap<String, InfileStream>>> {
+        self.deref().local_infile_registry()
     }
     async fn reconnect(&self) -> Result<()> {
         self.deref().reconnect().await

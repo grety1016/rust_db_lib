@@ -2,66 +2,56 @@ use crate::{
     row::{ColumnData, Row},
     Error, Result,
 };
+use futures_util::TryStreamExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 结果集
 pub struct ResultSet<'a> {
-    rows: Vec<Row>,
-    current: usize,
-    _marker: std::marker::PhantomData<&'a ()>,
+    stream: Option<futures_util::stream::BoxStream<'a, Result<tokio_postgres::Row>>>,
+    alive: &'a AtomicBool,
+    _guard: tokio::sync::MutexGuard<'a, tokio_postgres::Client>,
 }
 
 impl<'a> ResultSet<'a> {
-    pub(crate) fn new(rows: Vec<tokio_postgres::Row>, _conn: &'a crate::Connection) -> Self {
+    pub(crate) fn new(
+        stream: futures_util::stream::BoxStream<'a, Result<tokio_postgres::Row>>,
+        alive: &'a AtomicBool,
+        guard: tokio::sync::MutexGuard<'a, tokio_postgres::Client>,
+    ) -> Self {
+        alive.store(true, Ordering::SeqCst);
         Self {
-            rows: rows.into_iter().map(Row::new).collect(),
-            current: 0,
-            _marker: std::marker::PhantomData,
+            stream: Some(stream),
+            alive,
+            _guard: guard,
         }
-    }
-
-    /// 获取行数
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    /// 检查是否为空
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    /// 获取列数
-    pub fn column_count(&self) -> usize {
-        self.rows.first().map(|r| r.0.columns().len()).unwrap_or(0)
     }
 
     /// 获取一行数据移动到下一行
-    pub fn fetch(&mut self) -> Option<&Row> {
-        if self.current < self.rows.len() {
-            let row = &self.rows[self.current];
-            self.current += 1;
-            Some(row)
+    pub async fn fetch(&mut self) -> Result<Option<Row>> {
+        if let Some(stream) = self.stream.as_mut() {
+            match stream.try_next().await? {
+                Some(row) => Ok(Some(Row::new(row))),
+                None => {
+                    self.alive.store(false, Ordering::SeqCst);
+                    self.stream = None;
+                    Ok(None)
+                }
+            }
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    /// 重置到第一行
-    pub fn reset(&mut self) {
-        self.current = 0;
     }
 
     /// 获取第一行
     pub async fn first_row(&mut self) -> Result<Option<Row>> {
-        self.reset();
-        Ok(self.fetch().map(|r| Row::new(r.0.clone())))
+        self.fetch().await
     }
 
     /// 收集所有行数据
     pub async fn collect_row(&mut self) -> Result<Vec<Row>> {
-        self.reset();
-        let mut rows = Vec::with_capacity(self.rows.len());
-        while let Some(row) = self.fetch() {
-            rows.push(Row::new(row.0.clone()));
+        let mut rows = Vec::new();
+        while let Some(row) = self.fetch().await? {
+            rows.push(row);
         }
         Ok(rows)
     }
@@ -210,5 +200,11 @@ impl<'a> ResultSet<'a> {
         let row = self.first_row().await?;
         let de = crate::serde::RowOptional::new(row);
         R::deserialize(de).map_err(|e| Error::Deserialization(e.to_string()))
+    }
+}
+
+impl<'a> Drop for ResultSet<'a> {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
     }
 }

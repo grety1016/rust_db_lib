@@ -198,6 +198,11 @@ impl Connection {
         &self.pending
     }
 
+    /// 获取结果集存活标识引用
+    pub(crate) fn alive_rs_ref(&self) -> &AtomicBool {
+        &self.alive_rs
+    }
+
     /// 设置正在执行命令标识
     pub(crate) fn set_pending(&self, pending: bool) {
         self.pending.store(pending, Ordering::Release);
@@ -510,47 +515,46 @@ impl Connection {
     /// - `sql`: COPY 命令, 例如 "COPY table_name (col1, col2) FROM STDIN WITH CSV"
     /// - `stream`: 数据流, 每一项必须实现 `Buf` (如 `Bytes`)
     ///
-    /// # 1. Axum 场景 (从 HTTP API 接收流式数据直接推送到 DB)
-    /// ```rust,ignore
-    /// use axum::extract::BodyStream;
-    /// use futures_util::StreamExt;
-    ///
-    /// async fn upload_handler(State(pool): State<Pool>, body: BodyStream) -> Result<String, StatusCode> {
-    ///     let conn = pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    ///     let sql = "COPY users (name, email) FROM STDIN WITH CSV";
-    ///     
-    ///     // 将 axum 的 body stream 转换为 pgsql 需要的格式 (std::io::Error)
-    ///     let stream = body.map(|res| res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
-    ///     
-    ///     let count = conn.copy_in(sql, stream).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    ///     Ok(format!("成功导入 {} 条记录", count))
-    /// }
+    /// # 1. HTTP 场景 (从 HTTP API 接收流式数据直接推送到 DB)
+    /// ```rust
+    /// # use bytes::Bytes;
+    /// # use futures_util::stream;
+    /// # async fn _example() -> Result<(), pgsql::Error> {
+    /// # let conn: pgsql::Connection = unimplemented!();
+    /// let sql = "COPY users (name, email) FROM STDIN WITH CSV";
+    /// let chunks = vec![Ok::<_, std::io::Error>(Bytes::from("Alice,alice@example.com\n"))];
+    /// let stream = stream::iter(chunks);
+    /// let count = conn.copy_in(sql, stream).await?;
+    /// println!("导入 {} 条记录", count);
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # 2. 本地文件场景 (将本地大文件流式推送到 DB)
-    /// ```rust,ignore
-    /// use tokio::fs::File;
-    /// use tokio_util::io::ReaderStream;
-    ///
-    /// async fn import_local_file(conn: &Connection, path: &str) -> Result<u64> {
-    ///     let file = File::open(path).await?;
-    ///     let stream = ReaderStream::new(file);
-    ///     let sql = "COPY large_table FROM STDIN";
-    ///     conn.copy_in(sql, stream).await
-    /// }
+    /// ```rust
+    /// # use bytes::Bytes;
+    /// # use futures_util::stream;
+    /// # async fn _example() -> Result<(), pgsql::Error> {
+    /// # let conn: pgsql::Connection = unimplemented!();
+    /// let sql = "COPY large_table FROM STDIN WITH CSV";
+    /// let stream = stream::iter(Vec::<std::result::Result<Bytes, std::io::Error>>::new());
+    /// let _count = conn.copy_in(sql, stream).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # 3. 内存流场景 (将内存中的 Vec<u8> 或 String 模拟流推送)
-    /// ```rust,ignore
-    /// use futures_util::stream;
-    /// use bytes::Bytes;
-    ///
-    /// async fn import_memory(conn: &Connection) -> Result<u64> {
-    ///     let data = "1,Alice\n2,Bob\n";
-    ///     let chunks = vec![Ok::<_, std::io::Error>(Bytes::from(data))];
-    ///     let stream = stream::iter(chunks);
-    ///     conn.copy_in("COPY users FROM STDIN WITH CSV", stream).await
-    /// }
+    /// ```rust
+    /// # use bytes::Bytes;
+    /// # use futures_util::stream;
+    /// # async fn _example() -> Result<(), pgsql::Error> {
+    /// # let conn: pgsql::Connection = unimplemented!();
+    /// let data = "1,Alice\n2,Bob\n";
+    /// let chunks = vec![Ok::<_, std::io::Error>(Bytes::from(data))];
+    /// let stream = stream::iter(chunks);
+    /// let _count = conn.copy_in("COPY users FROM STDIN WITH CSV", stream).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn copy_in<S, B>(&self, sql: &str, mut stream: S) -> Result<u64>
     where
