@@ -618,4 +618,76 @@ impl Connection {
             }
         }
     }
+
+    /// 协议级 copy_out (用于海量数据导出)
+    ///
+    /// # 参数
+    /// - `sql`: COPY 命令, 例如 "COPY table_name (col1, col2) TO STDOUT WITH CSV"
+    ///
+    /// # 返回值
+    /// 返回一个字节流，可以从该流中读取从数据库导出的数据
+    ///
+    /// # 示例
+    /// ```rust
+    /// # use bytes::Bytes;
+    /// # use futures_util::StreamExt;
+    /// # async fn _example() -> Result<(), pgsql::Error> {
+    /// # let conn: pgsql::Connection = unimplemented!();
+    /// let sql = "COPY users (name, email) TO STDOUT WITH CSV";
+    /// let mut stream = conn.copy_out(sql).await?;
+    ///
+    /// // 逐块读取导出的数据
+    /// while let Some(result) = stream.next().await {
+    ///     match result {
+    ///         Ok(bytes) => {
+    ///             let data = String::from_utf8_lossy(&bytes);
+    ///             println!("接收到数据块: {}", data);
+    ///         },
+    ///         Err(e) => {
+    ///             eprintln!("读取数据时发生错误: {}", e);
+    ///             break;
+    ///         }
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn copy_out(
+        &self,
+        sql: &str,
+    ) -> Result<impl futures_util::Stream<Item = std::result::Result<bytes::Bytes, std::io::Error>>>
+    {
+        use futures_util::TryStreamExt;
+
+        if self.is_pending() {
+            return Err(Error::PendingError);
+        }
+        self.set_pending(true);
+        let now = time::Instant::now();
+        info!(
+            "#{}> [{}] @{} - copy_out starting, sql: {}",
+            self.spid(),
+            self.log_category(),
+            self.log_db_name(),
+            sql
+        );
+
+        let raw = self.raw.lock().await;
+        let stream = raw.copy_out(sql).await.map_err(Error::from)?;
+
+        // 将 tokio_postgres::CopyOutStream 转换为标准的 futures::Stream，同时处理错误类型
+        let result_stream = stream.map_err(std::io::Error::other);
+
+        self.set_pending(false);
+        info!(
+            "#{}> [{}] @{} - copy_out initialized, elapsed: {}ms, sql: {}",
+            self.spid(),
+            self.log_category(),
+            self.log_db_name(),
+            now.elapsed().as_millis(),
+            sql
+        );
+
+        Ok(Box::pin(result_stream))
+    }
 }
