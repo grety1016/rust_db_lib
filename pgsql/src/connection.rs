@@ -9,10 +9,66 @@ use crate::{
 use ::serde::de::DeserializeOwned;
 use std::{
     future::Future,
+    pin::Pin,
     sync::atomic::{AtomicBool, AtomicI16, AtomicI32, Ordering},
+    task::{Context, Poll},
     time,
 };
 use tokio::sync::Mutex;
+
+/// copy_out 返回的流包装器，在流被丢弃时自动重置 pending 状态
+pub struct CopyOutStream {
+    inner:
+        futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, std::io::Error>>,
+    pending: std::sync::Arc<AtomicBool>,
+    finished: bool,
+}
+
+impl CopyOutStream {
+    fn new(
+        inner: futures_util::stream::BoxStream<
+            'static,
+            std::result::Result<bytes::Bytes, std::io::Error>,
+        >,
+        pending: std::sync::Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            inner,
+            pending,
+            finished: false,
+        }
+    }
+
+    /// 标记流为已完成，防止 Drop 时重复重置
+    fn mark_finished(&mut self) {
+        self.finished = true;
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
+impl futures_util::Stream for CopyOutStream {
+    type Item = std::result::Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(None) => {
+                // 流结束，重置 pending 状态
+                self.mark_finished();
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+impl Drop for CopyOutStream {
+    fn drop(&mut self) {
+        if !self.finished {
+            // 流被提前丢弃，重置 pending 状态
+            self.pending.store(false, Ordering::Release);
+        }
+    }
+}
 
 /// Implemented for `&str` (connection string) and `tokio_postgres::Config`
 pub trait IntoConfig {
@@ -48,7 +104,7 @@ pub struct Connection {
     /// 是否正在执行命令
     ///
     /// 临时解决中途取消执行时造成后续执行永远挂起的问题
-    pending: AtomicBool,
+    pending: std::sync::Arc<AtomicBool>,
     /// 是否存在有效的`ResultSet`,防止查询过程中意外执行其他命令
     alive_rs: AtomicBool,
     /// 事务嵌套深度
@@ -134,7 +190,7 @@ impl Connection {
         Self {
             raw: Mutex::new(raw),
             conn_cfg,
-            pending: AtomicBool::new(false),
+            pending: std::sync::Arc::new(AtomicBool::new(false)),
             alive_rs: AtomicBool::new(false),
             trans_depth: AtomicI32::new(0),
             spid: AtomicI16::new(0),
@@ -652,12 +708,8 @@ impl Connection {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn copy_out(
-        &self,
-        sql: &str,
-    ) -> Result<impl futures_util::Stream<Item = std::result::Result<bytes::Bytes, std::io::Error>>>
-    {
-        use futures_util::TryStreamExt;
+    pub async fn copy_out(&self, sql: &str) -> Result<CopyOutStream> {
+        use futures_util::{StreamExt, TryStreamExt};
 
         if self.is_pending() {
             return Err(Error::PendingError);
@@ -673,12 +725,17 @@ impl Connection {
         );
 
         let raw = self.raw.lock().await;
-        let stream = raw.copy_out(sql).await.map_err(Error::from)?;
+        let stream = raw.copy_out(sql).await.map_err(|e| {
+            self.set_pending(false);
+            Error::from(e)
+        })?;
 
         // 将 tokio_postgres::CopyOutStream 转换为标准的 futures::Stream，同时处理错误类型
-        let result_stream = stream.map_err(std::io::Error::other);
+        let result_stream: futures_util::stream::BoxStream<
+            'static,
+            std::result::Result<bytes::Bytes, std::io::Error>,
+        > = stream.map_err(std::io::Error::other).boxed();
 
-        self.set_pending(false);
         info!(
             "#{}> [{}] @{} - copy_out initialized, elapsed: {}ms, sql: {}",
             self.spid(),
@@ -688,6 +745,6 @@ impl Connection {
             sql
         );
 
-        Ok(Box::pin(result_stream))
+        Ok(CopyOutStream::new(result_stream, self.pending.clone()))
     }
 }

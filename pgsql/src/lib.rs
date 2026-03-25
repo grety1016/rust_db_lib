@@ -16,7 +16,7 @@ mod row;
 mod serde;
 mod sql;
 
-pub use connection::Connection;
+pub use connection::{Connection, CopyOutStream};
 pub use error::Error;
 pub use fmt::{SqlIdent, ToSqlString};
 pub use pool::{Executor, Pool, PooledConnection, TokioRuntimeExecutor};
