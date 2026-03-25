@@ -454,12 +454,13 @@ pub trait MySqlExecutor: Send + Sync {
 
         let mut conn = self.lock_raw().await;
         let start = std::time::Instant::now();
+        let sql_for_log = final_sql.replace('\n', "\\n").replace('\r', "\\r");
         info!(
             "#{}> [{}] @{} - copy_in starting, sql: {}",
             self.spid(),
             "mysql",
             self.log_db_name(),
-            final_sql
+            sql_for_log
         );
 
         let res = conn.query_drop(final_sql).await.map_err(Error::from);
@@ -469,6 +470,7 @@ pub trait MySqlExecutor: Send + Sync {
         match res {
             Ok(_) => {
                 let rows = conn.affected_rows();
+                let sql_for_log = sql.replace('\n', "\\n").replace('\r', "\\r");
                 info!(
                     "#{}> [{}] @{} - copy_in finished, elapsed: {}ms, rows: {}, sql: {}",
                     self.spid(),
@@ -476,11 +478,12 @@ pub trait MySqlExecutor: Send + Sync {
                     self.log_db_name(),
                     start.elapsed().as_millis(),
                     rows,
-                    sql
+                    sql_for_log
                 );
                 Ok(rows)
             }
             Err(e) => {
+                let sql_for_log = sql.replace('\n', "\\n").replace('\r', "\\r");
                 error!(
                     "#{}> [{}] @{} - copy_in failed, elapsed: {}ms, error: {}, sql: {}",
                     self.spid(),
@@ -488,7 +491,7 @@ pub trait MySqlExecutor: Send + Sync {
                     self.log_db_name(),
                     start.elapsed().as_millis(),
                     e,
-                    sql
+                    sql_for_log
                 );
                 // 确保清理注册表 (虽然 handle 成功会自动清理, 但如果执行失败可能还残留)
                 let mut registry = self

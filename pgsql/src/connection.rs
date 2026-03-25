@@ -625,12 +625,13 @@ impl Connection {
         }
         self.set_pending(true);
         let now = time::Instant::now();
+        let sql_for_log = sql.replace('\n', "\\n").replace('\r', "\\r");
         info!(
             "#{}> [{}] @{} - copy_in starting, sql: {}",
             self.spid(),
             self.log_category(),
             self.log_db_name(),
-            sql
+            sql_for_log
         );
 
         let raw = self.raw.lock().await;
@@ -649,6 +650,7 @@ impl Connection {
         self.set_pending(false);
         match res {
             Ok(count) => {
+                let sql_for_log = sql.replace('\n', "\\n").replace('\r', "\\r");
                 info!(
                     "#{}> [{}] @{} - copy_in finished, elapsed: {}ms, rows: {}, sql: {}",
                     self.spid(),
@@ -656,11 +658,12 @@ impl Connection {
                     self.log_db_name(),
                     now.elapsed().as_millis(),
                     count,
-                    sql
+                    sql_for_log
                 );
                 Ok(count)
             }
             Err(e) => {
+                let sql_for_log = sql.replace('\n', "\\n").replace('\r', "\\r");
                 error!(
                     "#{}> [{}] @{} - copy_in failed, elapsed: {}ms, error: {}, sql: {}",
                     self.spid(),
@@ -668,7 +671,7 @@ impl Connection {
                     self.log_db_name(),
                     now.elapsed().as_millis(),
                     e,
-                    sql
+                    sql_for_log
                 );
                 Err(e)
             }

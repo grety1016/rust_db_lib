@@ -121,7 +121,7 @@ impl<'a> Sql<'a> {
     /// 预览语句
     pub fn preview(&self) -> String {
         lazy_static::lazy_static! {
-            static ref RE_SQL_LOG_FMT: regex::Regex = regex::Regex::new(r"\s+").unwrap();
+            static ref RE_SQL_LOG_FMT: regex::Regex = regex::Regex::new(r"[ \t]+").unwrap();
         }
         let mut sql = self.sql.to_string();
         for (i, val) in self.param_previews.iter().enumerate() {

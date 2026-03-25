@@ -90,7 +90,7 @@ impl<'a> Sql<'a> {
     /// 预览语句
     pub fn preview(&self) -> String {
         lazy_static::lazy_static! {
-            static ref RE_SQL_LOG_FMT: regex::Regex = regex::Regex::new(r"\s+").unwrap();
+            static ref RE_SQL_LOG_FMT: regex::Regex = regex::Regex::new(r"[ \t]+").unwrap();
         }
         if log_sql_params_enabled() {
             let sql = format!("{:?}", self.query);
