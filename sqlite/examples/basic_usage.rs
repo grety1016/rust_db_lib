@@ -24,9 +24,9 @@ async fn main() -> Result<()> {
     let uid = Uuid::new_v4();
     let price = Decimal::from_f64_retain(99.99).unwrap();
 
-    // 方式 A: 使用 sql_bind! 宏 (对齐 pgsql 手感，支持 $1 占位符)
+    // 方式 A: 使用 sql_bind! 宏 (使用 SQLite 原生 ? 占位符)
     conn.exec(sql_bind!(
-        "INSERT INTO products (name, price, created_at, uid, active) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO products (name, price, created_at, uid, active) VALUES (?, ?, ?, ?, ?)",
         "Rust Book",
         price,
         now,
@@ -43,8 +43,8 @@ async fn main() -> Result<()> {
         .bind(false);
     conn.exec(sql).await?;
 
-    // 4. 查询多行 (对齐 pgsql query_collect_row)
-    let products: Vec<Row> = conn.query_collect_row(sql_bind!("SELECT * FROM products WHERE active = $1", true))
+    // 4. 查询多行
+    let products: Vec<Row> = conn.query_collect_row(sql_bind!("SELECT * FROM products WHERE active = ?", true))
         .await?;
 
     println!("Active products count: {}", products.len());
@@ -55,8 +55,8 @@ async fn main() -> Result<()> {
         println!("Product: name={}, price={}, uid={}", name, price, uid);
     }
 
-    // 5. 查询标量值 (对齐 pgsql query_scalar_*)
-    let price: Decimal = conn.query_scalar_decimal(sql_bind!("SELECT price FROM products WHERE name = $1", "Rust Book"))
+    // 5. 查询标量值
+    let price: Decimal = conn.query_scalar_decimal(sql_bind!("SELECT price FROM products WHERE name = ?", "Rust Book"))
         .await?
         .unwrap_or_default();
     
@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
 
     // 6. 事务处理
     conn.scoped_trans(|| async {
-        conn.exec(sql_bind!("UPDATE products SET active = $1 WHERE name = $2", false, "Rust Book")).await?;
+        conn.exec(sql_bind!("UPDATE products SET active = ? WHERE name = ?", false, "Rust Book")).await?;
         Ok(())
     }).await?;
 

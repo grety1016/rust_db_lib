@@ -96,7 +96,9 @@ impl Connection {
     pub async fn rollback(&self) -> Result<()> {
         let depth = self.trans_depth.load(Ordering::SeqCst);
         if depth <= 0 {
-            return Err(Error::Custom("No active transaction to rollback".to_string()));
+            return Err(Error::Custom(
+                "No active transaction to rollback".to_string(),
+            ));
         }
         if depth == 1 {
             self.execute_raw("ROLLBACK", vec![]).await?;
@@ -146,7 +148,7 @@ impl Connection {
         }
     }
 
-    /// 执行 SQL 命令 (对齐 pgsql)
+    /// 执行 SQL 命令
     pub async fn exec(&self, sql: impl IntoSql<'_>) -> Result<u64> {
         sql.into_sql().exec(self, None).await
     }
@@ -156,12 +158,12 @@ impl Connection {
         sql.into_sql().exec(self, Some(duration)).await
     }
 
-    /// 查询多行 (对齐 pgsql)
+    /// 查询多行
     pub async fn query(&self, sql: impl IntoSql<'_>) -> Result<ResultSet> {
         sql.into_sql().query(self, None).await
     }
 
-    /// 查询多行并返回 Vec<Row> (对齐 pgsql query_collect_row)
+    /// 查询多行并返回 Vec<Row>
     pub async fn query_collect_row(&self, sql: impl IntoSql<'_>) -> Result<Vec<Row>> {
         sql.into_sql().query_collect_row(self, None).await
     }
@@ -208,15 +210,22 @@ impl Connection {
     }
 
     /// 内部查询方法
-    pub(crate) async fn fetch_all_raw(&self, sql: &str, params: Vec<ColumnData>) -> Result<ResultSet> {
+    pub(crate) async fn fetch_all_raw(
+        &self,
+        sql: &str,
+        params: Vec<ColumnData>,
+    ) -> Result<ResultSet> {
         let sql = sql.to_string();
         let rows = self
             .conn
             .call(move |conn| {
                 let params = to_rusqlite_params(&params);
                 let mut stmt = conn.prepare(&sql)?;
-                let column_names: Vec<String> =
-                    stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+                let column_names: Vec<String> = stmt
+                    .column_names()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
 
                 let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
                     let mut data = Vec::with_capacity(column_names.len());
@@ -252,18 +261,21 @@ fn map_rusqlite_value(val: ValueRef) -> ColumnData {
 }
 
 fn to_rusqlite_params(params: &[ColumnData]) -> Vec<rusqlite::types::Value> {
-    params.iter().map(|p| match p {
-        ColumnData::String(s) => rusqlite::types::Value::Text(s.clone()),
-        ColumnData::Int(i) => rusqlite::types::Value::Integer(*i),
-        ColumnData::Float(f) => rusqlite::types::Value::Real(*f),
-        ColumnData::Bool(b) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
-        ColumnData::Decimal(d) => rusqlite::types::Value::Text(d.to_string()),
-        ColumnData::DateTime(dt) => rusqlite::types::Value::Text(dt.to_string()),
-        ColumnData::Uuid(u) => rusqlite::types::Value::Text(u.to_string()),
-        ColumnData::Blob(b) => rusqlite::types::Value::Blob(b.clone()),
-        ColumnData::Null => rusqlite::types::Value::Null,
-        _ => rusqlite::types::Value::Null,
-    }).collect()
+    params
+        .iter()
+        .map(|p| match p {
+            ColumnData::String(s) => rusqlite::types::Value::Text(s.clone()),
+            ColumnData::Int(i) => rusqlite::types::Value::Integer(*i),
+            ColumnData::Float(f) => rusqlite::types::Value::Real(*f),
+            ColumnData::Bool(b) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
+            ColumnData::Decimal(d) => rusqlite::types::Value::Text(d.to_string()),
+            ColumnData::DateTime(dt) => rusqlite::types::Value::Text(dt.to_string()),
+            ColumnData::Uuid(u) => rusqlite::types::Value::Text(u.to_string()),
+            ColumnData::Blob(b) => rusqlite::types::Value::Blob(b.clone()),
+            ColumnData::Null => rusqlite::types::Value::Null,
+            _ => rusqlite::types::Value::Null,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -282,7 +294,9 @@ mod tests {
         )
         .await?;
 
-        let now = chrono::DateTime::from_timestamp(1600000000, 0).unwrap().naive_utc();
+        let now = chrono::DateTime::from_timestamp(1600000000, 0)
+            .unwrap()
+            .naive_utc();
         let uid = Uuid::new_v4();
         let price = dec!(123.45);
         let blob = vec![1, 2, 3, 4];

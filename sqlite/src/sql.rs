@@ -31,31 +31,18 @@ impl<'a> Sql<'a> {
     /// 预览语句
     pub fn preview(&self) -> String {
         let mut sql = self.sql.to_string();
-        for (i, val) in self.params.iter().enumerate() {
-            let placeholder = format!("${}", i + 1);
-            sql = sql.replace(&placeholder, &format!("{:?}", val));
+        // SQLite common placeholder is '?'
+        for val in &self.params {
+            sql = sql.replacen('?', &format!("{:?}", val), 1);
         }
-        // Also handle '?' placeholders for preview
-        if sql == self.sql {
-            for val in &self.params {
-                sql = sql.replacen('?', &format!("{:?}", val), 1);
+        // Handle $1, $2 style as well for preview (supported by SQLite as named params)
+        if sql.contains('$') {
+            for (i, val) in self.params.iter().enumerate() {
+                let placeholder = format!("${}", i + 1);
+                sql = sql.replace(&placeholder, &format!("{:?}", val));
             }
         }
         format!("{} [params={}]", sql, self.params.len())
-    }
-
-    /// 内部方法：转换 PostgreSQL 风格占位符 ($1, $2) 为 SQLite 风格 (?)
-    fn prepare_sql(&self) -> Cow<'a, str> {
-        if self.sql.contains('$') {
-            let mut sql = self.sql.to_string();
-            for i in (1..=self.params.len()).rev() {
-                let placeholder = format!("${}", i);
-                sql = sql.replace(&placeholder, "?");
-            }
-            Cow::Owned(sql)
-        } else {
-            self.sql.clone()
-        }
     }
 
     /// 执行命令
@@ -64,8 +51,9 @@ impl<'a> Sql<'a> {
         debug!("SQLite exec: {}", sql_preview);
         let now = Instant::now();
 
-        let sql = self.prepare_sql();
-        let rv = conn.execute_raw(sql.as_ref(), self.params.clone()).await;
+        let rv = conn
+            .execute_raw(self.sql.as_ref(), self.params.clone())
+            .await;
 
         match rv {
             Ok(effected) => {
@@ -99,8 +87,9 @@ impl<'a> Sql<'a> {
         debug!("SQLite query: {}", sql_preview);
         let now = Instant::now();
 
-        let sql = self.prepare_sql();
-        let rv = conn.fetch_all_raw(sql.as_ref(), self.params.clone()).await;
+        let rv = conn
+            .fetch_all_raw(self.sql.as_ref(), self.params.clone())
+            .await;
 
         match rv {
             Ok(rs) => {
@@ -134,8 +123,9 @@ impl<'a> Sql<'a> {
         debug!("SQLite query: {}", sql_preview);
         let now = Instant::now();
 
-        let sql = self.prepare_sql();
-        let rv = conn.fetch_all_raw(sql.as_ref(), self.params.clone()).await;
+        let rv = conn
+            .fetch_all_raw(self.sql.as_ref(), self.params.clone())
+            .await;
 
         match rv {
             Ok(rs) => {
