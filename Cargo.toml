@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["mssql", "pgsql", "mysql"]
+members = ["mssql", "pgsql", "mysql", "sqlite"]
 
 [package]
 name = "rustdemo"
@@ -11,6 +11,8 @@ edition = "2024"
 mssql = { path = "mssql" }
 pgsql = { path = "pgsql" }
 mysql = { path = "mysql" }
+sqlite = { path = "sqlite" }
+
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 tracing-subscriber = { version = "0.3", features = [
