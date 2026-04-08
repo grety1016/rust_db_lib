@@ -35,48 +35,68 @@ use pgsql::Error as PgsqlError;
 /// ### 示例场景：
 /// - **全脱敏**：`"password":"Kephi520!"` -> 识别到关键字 `password`，将值替换为 `****`。
 /// - **半脱敏**：`"phone":"13812345678"` -> 识别到 `phone`，提取出 `13812345678`，保留头尾显示为 `138***5678`。
-fn apply_masking(input: &str) -> String {
-    lazy_static::lazy_static! {
-        // 1. 全脱敏正则: 匹配密码、密钥、令牌等。
-        // 匹配逻辑：找到关键字后，将其后的具体值替换为 ****。
-        static ref RE_FULL: regex::Regex = regex::Regex::new(r#"(?i)(password|pwd|secret|token)["\s:=]+([^"\s,;]+)"#).unwrap();
+use lazy_static::lazy_static;
+use regex::{Captures, Regex};
 
-        // 2. 半脱敏正则: 匹配手机号、账号、身份证等。
-        // 匹配逻辑：找到关键字后，提取值，保留前3位和后4位，中间加掩码。
-        static ref RE_PARTIAL: regex::Regex = regex::Regex::new(r#"(?i)(phone|mobile|account|id_card)["\s:=]+([^"\s,;]+)"#).unwrap();
+/// 全局脱敏逻辑
+fn apply_masking(input: &str) -> String {
+    // 1. 定义敏感词库 (以后只需在这里维护)
+    const RULES_FULL: &[&str] = &["password", "pwd", "secret", "token"];
+    const RULES_PARTIAL: &[&str] = &["phone", "mobile", "account", "id_card"];
+
+    // 2. 性能预检 (Fast Fail)：如果日志中根本没出现这些词的前缀，直接跳过正则，保护 CPU
+    // 使用简单的 contains 检查，比直接跑正则快得多
+    let input_lower = input.to_lowercase();
+    let has_full = RULES_FULL.iter().any(|&k| input_lower.contains(k));
+    let has_partial = RULES_PARTIAL.iter().any(|&k| input_lower.contains(k));
+
+    if !has_full && !has_partial {
+        return input.to_string();
+    }
+
+    lazy_static! {
+        // 动态构建正则：根据上面的数组自动生成 (password|pwd|...) 格式
+        static ref RE_FULL: Regex = Regex::new(&format!(
+            r#"(?i)({})["\s:=]+([^"\s,;]+)"#,
+            RULES_FULL.join("|")
+        )).unwrap();
+
+        static ref RE_PARTIAL: Regex = Regex::new(&format!(
+            r#"(?i)({})["\s:=]+([^"\s,;]+)"#,
+            RULES_PARTIAL.join("|")
+        )).unwrap();
     }
 
     let mut output = input.to_string();
 
-    // 执行全脱敏替换
-    output = RE_FULL
-        .replace_all(&output, |caps: &regex::Captures| {
-            // caps[1] 是匹配到的关键字，如 password
-            format!("{}:****", &caps[1])
-        })
-        .to_string();
+    // 3. 执行全脱敏 (如果预检命中的话)
+    if has_full {
+        output = RE_FULL
+            .replace_all(&output, |caps: &Captures| format!("{}:****", &caps[1]))
+            .to_string();
+    }
 
-    // 执行半脱敏替换
-    output = RE_PARTIAL
-        .replace_all(&output, |caps: &regex::Captures| {
-            let key = &caps[1];
-            let val = &caps[2];
-            // 对值进行掩码处理
-            let masked = if val.len() > 11 {
-                format!("{}***{}", &val[..6], &val[val.len() - 4..])
-            } else if val.len() > 7 {
-                // 长度足够，保留前3后4，如: 13812345678 -> 138***5678
-                format!("{}***{}", &val[..3], &val[val.len() - 4..])
-            } else if val.len() > 2 {
-                // 长度较短，只保留前2位
-                format!("{}***", &val[..2])
-            } else {
-                // 极短内容，直接全部掩码
-                "***".to_string()
-            };
-            format!("{}:{}", key, masked)
-        })
-        .to_string();
+    // 4. 执行半脱敏 (如果预检命中的话)
+    if has_partial {
+        output = RE_PARTIAL
+            .replace_all(&output, |caps: &Captures| {
+                let key = &caps[1];
+                let val = &caps[2];
+                let masked = if val.len() > 11 {
+                    // 针对长字段（如身份证或长账号）保留前6后4
+                    format!("{}***{}", &val[..6], &val[val.len() - 4..])
+                } else if val.len() > 7 {
+                    // 针对手机号保留前3后4
+                    format!("{}***{}", &val[..3], &val[val.len() - 4..])
+                } else if val.len() > 2 {
+                    format!("{}***", &val[..2])
+                } else {
+                    "***".to_string()
+                };
+                format!("{}:{}", key, masked)
+            })
+            .to_string();
+    }
 
     output
 }
@@ -180,7 +200,7 @@ pub fn init_dev() -> Vec<tracing_appender::non_blocking::WorkerGuard> {
     let mysql_appender = RollingFileAppender::new(Rotation::NEVER, "logfiles", "mysql_dev.log");
     let mysql_masking = MaskingWriter {
         inner: mysql_appender,
-    };
+    }; //敏感信息过滤器
     let (mysql_nb, mysql_guard) = tracing_appender::non_blocking(mysql_masking);
     guards.push(mysql_guard);
 
@@ -648,6 +668,15 @@ async fn init_pgsql() -> Result<(), PgsqlError> {
     conn.rollback().await?;
 
     conn.scoped_trans(async {
+        // conn.exec(pgsql::sql_bind!(
+        //     pgsql::sql_format!(
+        //         "SELECT * FROM {} WHERE id = $1 AND status = $2",
+        //         pgsql::sql_ident!("users")
+        //     ),
+        //     1,
+        //     "active"
+        // ))
+        // .await?;
         conn.exec(pgsql::sql_bind!(
             "INSERT INTO demo_users (id, name, age) VALUES ($1, $2, $3)",
             3,
