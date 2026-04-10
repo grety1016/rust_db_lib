@@ -2,14 +2,37 @@ use crate::{
     row::{ColumnData, Row},
     Error, Result,
 };
-use futures_util::TryStreamExt;
+use futures_util::{Stream, StreamExt};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 
 /// 结果集
 pub struct ResultSet<'a> {
     stream: Option<futures_util::stream::BoxStream<'a, Result<tokio_postgres::Row>>>,
     alive: &'a AtomicBool,
     _guard: tokio::sync::MutexGuard<'a, tokio_postgres::Client>,
+}
+
+impl<'a> Stream for ResultSet<'a> {
+    type Item = Result<Row>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let stream = match self.stream.as_mut() {
+            Some(s) => s,
+            None => return Poll::Ready(None),
+        };
+
+        match Pin::new(stream).poll_next(cx) {
+            Poll::Ready(Some(res)) => Poll::Ready(Some(res.map(Row::new))),
+            Poll::Ready(None) => {
+                self.alive.store(false, Ordering::SeqCst);
+                self.stream = None;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 impl<'a> ResultSet<'a> {
@@ -28,18 +51,7 @@ impl<'a> ResultSet<'a> {
 
     /// 获取一行数据移动到下一行
     pub async fn fetch(&mut self) -> Result<Option<Row>> {
-        if let Some(stream) = self.stream.as_mut() {
-            match stream.try_next().await? {
-                Some(row) => Ok(Some(Row::new(row))),
-                None => {
-                    self.alive.store(false, Ordering::SeqCst);
-                    self.stream = None;
-                    Ok(None)
-                }
-            }
-        } else {
-            Ok(None)
-        }
+        self.next().await.transpose()
     }
 
     /// 获取第一行
